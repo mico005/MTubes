@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+yt-dlp
+httpx
+sqlalchemy
+psycopg2-binary
+pydantic
+pydantic-settings
