@@ -1,16 +1,29 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
-from app.core.config import settings
 
 # Using SQLite for instant MVP testing. Swap to Postgres URI in .env later.
+SQLALCHEMY_DATABASE_URL = "sqlite:///./music_clone.db"
+
 engine = create_engine(
-    settings.DATABASE_URL,
+    SQLALCHEMY_DATABASE_URL,
     connect_args={
-        "check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+        "check_same_thread": False,
+        "timeout": 15
+    }
 )
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Enable Write-Ahead Logging (WAL) to allow simultaneous readers and one writer
 
+
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.close()
+
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 

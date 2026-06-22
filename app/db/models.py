@@ -22,6 +22,11 @@ class MediaMetadata(Base):
     duration = Column(Integer, nullable=False, default=0)
     extracted_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    energy = Column(Float, nullable=True)
+    danceability = Column(Float, nullable=True)
+    acousticness = Column(Float, nullable=True)
+    features_extracted = Column(Boolean, nullable=False, default=False)
+
 
 class PlayLog(Base):
     __tablename__ = "play_logs"

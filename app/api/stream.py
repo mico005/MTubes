@@ -36,10 +36,16 @@ async def proxy_audio_stream(video_id: str, request: Request):
                 if k.lower() in ["accept-ranges", "content-range", "content-length", "content-type"]}
 
     async def stream_generator():
-        # Using stream=True directly in the client call is safer
-        async with stream_client.stream("GET", stream_url, headers=headers) as r:
-            async for chunk in r.aiter_bytes(chunk_size=16384):
-                yield chunk
+        try:
+            async with stream_client.stream("GET", stream_url, headers=headers) as r:
+                async for chunk in r.aiter_bytes(chunk_size=16384):
+                    # Actively monitor if the browser skips the track or closes the tab
+                    if await request.is_disconnected():
+                        break
+                    yield chunk
+        except Exception:
+            # Safely suppress upstream disconnects when YouTube closes the socket early
+            pass
 
     return StreamingResponse(
         stream_generator(),

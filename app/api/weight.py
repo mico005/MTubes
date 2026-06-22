@@ -6,8 +6,6 @@ from app.services.weight_service import apply_active_action, apply_passive_progr
 
 router = APIRouter()
 
-# Explicit schemas guarantee FastAPI will not throw 422 errors on standard JSON payloads
-
 
 class ActionPayload(BaseModel):
     action: str
@@ -16,9 +14,11 @@ class ActionPayload(BaseModel):
 class PassivePayload(BaseModel):
     seconds: float
 
+# Removed 'async' so FastAPI automatically handles synchronous DB calls in a threadpool
+
 
 @router.post("/action/{external_id}")
-async def track_action(external_id: str, payload: ActionPayload, db: Session = Depends(get_db)):
+def track_action(external_id: str, payload: ActionPayload, db: Session = Depends(get_db)):
     if payload.action not in ["upvote", "downvote", "favorite", "trash"]:
         return {"status": "error", "message": "Invalid action"}
 
@@ -27,6 +27,6 @@ async def track_action(external_id: str, payload: ActionPayload, db: Session = D
 
 
 @router.post("/passive/{external_id}")
-async def passive_progress(external_id: str, payload: PassivePayload, db: Session = Depends(get_db)):
+def passive_progress(external_id: str, payload: PassivePayload, db: Session = Depends(get_db)):
     new_score = apply_passive_progress(db, external_id, payload.seconds)
     return {"status": "success", "new_score": new_score}

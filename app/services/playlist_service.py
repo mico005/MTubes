@@ -1,14 +1,14 @@
 import uuid
 from sqlalchemy.orm import Session
-from app.db.models import Playlist, PlaylistTrack, MediaMetadata, WeightScore
+from app.db.models import Playlist, PlaylistTrack, MediaMetadata
 from app.schemas import TrackRequest
 from app.services.weight_service import enrich_tracks_with_scores
 from app.services.common_service import get_or_create_dummy_user, upsert_media_metadata, DUMMY_USER_ID
 
 
 def get_playlists(db: Session) -> list[dict]:
-    playlists = db.query(Playlist).filter(
-        Playlist.user_id == DUMMY_USER_ID).order_by(Playlist.created_at).all()
+    user_id = get_or_create_dummy_user(db)
+    playlists = db.query(Playlist).filter(Playlist.user_id == user_id).all()
     return [{"id": str(p.id), "name": p.name} for p in playlists]
 
 
@@ -42,36 +42,73 @@ def remove_track(db: Session, playlist_id: str, external_id: str):
     db.commit()
 
 
-def _map_to_raw_tracks(media_results: list) -> list[dict]:
-    """Helper to transform ORM models to raw track dicts."""
-    return [{
-        "id": media.external_id,
-        "title": media.title,
-        "uploader": media.uploader,
-        "thumbnail": media.thumbnail,
-        "duration": media.duration
-    } for media in media_results]
-
-
 def get_playlist_tracks(db: Session, playlist_id: str) -> list[dict]:
+    valid_pid = uuid.UUID(playlist_id)
+
     results = (
         db.query(MediaMetadata)
         .join(PlaylistTrack, PlaylistTrack.media_id == MediaMetadata.id)
-        .filter(PlaylistTrack.playlist_id == uuid.UUID(playlist_id))
-        .order_by(PlaylistTrack.added_at.desc())
+        .filter(PlaylistTrack.playlist_id == valid_pid)
         .all()
     )
-    raw_tracks = _map_to_raw_tracks(results)
+
+    raw_tracks = [
+        {
+            "id": m.external_id,
+            "title": m.title,
+            "uploader": m.uploader,
+            "thumbnail": m.thumbnail,
+            "duration": m.duration,
+        }
+        for m in results
+    ]
+
+    return enrich_tracks_with_scores(db, raw_tracks)
+
+
+def get_favorites(db: Session) -> list[dict]:
+    user_id = get_or_create_dummy_user(db)
+    from app.db.models import WeightScore
+    results = (
+        db.query(MediaMetadata)
+        .join(WeightScore, WeightScore.external_id == MediaMetadata.external_id)
+        .filter(WeightScore.user_id == user_id, WeightScore.is_favorited == True, WeightScore.is_trashed == False)
+        .all()
+    )
+
+    raw_tracks = [
+        {
+            "id": m.external_id,
+            "title": m.title,
+            "uploader": m.uploader,
+            "thumbnail": m.thumbnail,
+            "duration": m.duration,
+        }
+        for m in results
+    ]
+
     return enrich_tracks_with_scores(db, raw_tracks)
 
 
 def get_favorite_tracks(db: Session) -> list[dict]:
+    user_id = get_or_create_dummy_user(db)
+    from app.db.models import WeightScore
     results = (
         db.query(MediaMetadata)
         .join(WeightScore, WeightScore.external_id == MediaMetadata.external_id)
-        .filter(WeightScore.user_id == DUMMY_USER_ID, WeightScore.is_favorited == True)
-        .order_by(WeightScore.updated_at.desc())
+        .filter(WeightScore.user_id == user_id, WeightScore.is_favorited == True, WeightScore.is_trashed == False)
         .all()
     )
-    raw_tracks = _map_to_raw_tracks(results)
+
+    raw_tracks = [
+        {
+            "id": m.external_id,
+            "title": m.title,
+            "uploader": m.uploader,
+            "thumbnail": m.thumbnail,
+            "duration": m.duration,
+        }
+        for m in results
+    ]
+
     return enrich_tracks_with_scores(db, raw_tracks)

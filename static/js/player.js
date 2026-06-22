@@ -7,6 +7,15 @@ class Formatter {
   }
 }
 
+class ArrayUtils {
+  static shuffleInPlace(array, startIndex = 0) {
+    for (let i = array.length - 1; i > startIndex; i--) {
+      const j = startIndex + Math.floor(Math.random() * (i - startIndex + 1));
+      [array[i], array[j]] = [array[j], array[i]];
+    }
+  }
+}
+
 class ApiService {
   static async request(method, endpoint, body = null) {
     const config = { method, headers: {} };
@@ -18,6 +27,7 @@ class ApiService {
     if (!res.ok) throw new Error(`API Error: ${res.statusText}`);
     return res.status !== 204 ? res.json() : null;
   }
+
   static get(endpoint) {
     return this.request("GET", endpoint);
   }
@@ -33,7 +43,7 @@ class QueueManager {
   constructor() {
     this.tracks = [];
     this.index = -1;
-    this.mode = "discover";
+    this.mode = "all";
     this.isPlaylistMode = false;
   }
 
@@ -49,10 +59,7 @@ class QueueManager {
     const current = tracks[startIndex];
     const rest = tracks.filter((_, i) => i !== startIndex);
 
-    for (let i = rest.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [rest[i], rest[j]] = [rest[j], rest[i]];
-    }
+    ArrayUtils.shuffleInPlace(rest);
 
     this.tracks = [current, ...rest];
     this.index = 0;
@@ -77,16 +84,7 @@ class QueueManager {
       this.index >= this.tracks.length - 1
     )
       return;
-
-    const preserved = this.tracks.slice(0, this.index + 1);
-    const upcoming = this.tracks.slice(this.index + 1);
-
-    for (let i = upcoming.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [upcoming[i], upcoming[j]] = [upcoming[j], upcoming[i]];
-    }
-
-    this.tracks = [...preserved, ...upcoming];
+    ArrayUtils.shuffleInPlace(this.tracks, this.index + 1);
   }
 
   nextIndex() {
@@ -117,6 +115,7 @@ class AudioController {
     this.volumeIcon = document.getElementById("volumeIcon");
     this.seekSlider = document.getElementById("seekSlider");
     this.volumeSlider = document.getElementById("volumeSlider");
+    this.retryCount = 0;
     this.bindEvents();
   }
 
@@ -124,15 +123,54 @@ class AudioController {
     this.el.addEventListener("timeupdate", () => this.updateProgress());
     this.el.addEventListener("loadedmetadata", () => this.updateDuration());
     this.el.addEventListener("ended", () => this.app.playNext());
+    this.el.addEventListener("error", () => this.handleStreamError());
   }
 
   play(url = null) {
-    if (url) this.el.src = url;
+    if (url) {
+      this.retryCount = 0;
+      this.el.pause();
+      this.el.src = "";
+      this.el.load();
+      this.el.src = url;
+    }
+
     const promise = this.el.play();
-    if (promise)
+    if (promise) {
       promise
         .then(() => (this.playIcon.className = "bi bi-pause-fill"))
-        .catch((e) => console.error(e));
+        .catch(() => setTimeout(() => this.play(), 500));
+    }
+  }
+
+  handleStreamError() {
+    const err = this.el.error;
+
+    // HTMLMediaElement.MEDIA_ERR_NETWORK === 2
+    if (err && err.code === 2 && this.el.src) {
+      if (this.retryCount < 3) {
+        this.retryCount++;
+        const droppedTime = this.el.currentTime;
+        console.warn(
+          `Stream dropped. Reconnecting (${this.retryCount}/3) at ${droppedTime}s...`,
+        );
+
+        const currentUrl = this.el.src;
+        this.el.pause();
+        this.el.src = "";
+        this.el.load();
+        this.el.src = currentUrl;
+        this.el.currentTime = droppedTime;
+        this.play();
+      } else {
+        console.error("Stream unrecoverable. Skipping to next track.");
+        this.app.playNext();
+      }
+    } else if (err && err.code === 4) {
+      // HTMLMediaElement.MEDIA_ERR_SRC_NOT_SUPPORTED === 4
+      console.error("Stream failed to load. Skipping to next track.");
+      this.app.playNext();
+    }
   }
 
   pause() {
@@ -196,18 +234,18 @@ class PassiveScoreTracker {
     this.stop();
     this.activeTrackId = trackId;
     this.interval = setInterval(async () => {
-      if (!audioEl.paused && this.activeTrackId) {
-        try {
-          const res = await ApiService.post(
-            `/api/weight/passive/${this.activeTrackId}`,
-            { seconds: 10.0 },
-          );
-          if (res.status === "success" && res.new_score !== undefined) {
-            onUpdate(this.activeTrackId, res.new_score);
-          }
-        } catch (e) {
-          console.error("Score tracker error", e);
+      if (audioEl.paused || !this.activeTrackId) return;
+
+      try {
+        const res = await ApiService.post(
+          `/api/weight/passive/${this.activeTrackId}`,
+          { seconds: 10.0 },
+        );
+        if (res.status === "success" && res.new_score !== undefined) {
+          onUpdate(this.activeTrackId, res.new_score);
         }
+      } catch (e) {
+        console.error("Score tracker error", e);
       }
     }, 10000);
   }
@@ -223,6 +261,12 @@ class UIBuilder {
     return url
       ? `<img src="${url}" class="cover-img me-3" alt="Thumb" onerror="this.replaceWith(Object.assign(document.createElement('i'), {className: '${icon}'}))">`
       : `<i class="${icon}"></i>`;
+  }
+
+  static createPlaylistItemHTML(id, name, iconClass, isActive) {
+    const activeClass = isActive ? "active" : "";
+    const safeName = name.replace(/'/g, "\\'");
+    return `<button class="list-group-item list-group-item-action playlist-item ${activeClass}" data-playlist-id="${id}" onclick="app.selectPlaylist('${id}', '${safeName}')"><i class="${iconClass} me-2"></i> ${name}</button>`;
   }
 
   static createTrackElement(track, index, onClick, onRemove = null) {
@@ -272,15 +316,28 @@ class UIManager {
   }
 
   bindEvents() {
+    this.bindNavigation();
+    this.bindSearch();
+    this.bindPlaylists();
+    this.bindQueue();
+    this.bindPlayer();
+    this.bindKeyboardShortcuts();
+  }
+
+  bindNavigation() {
     const bind = (id, handler) =>
       document.getElementById(id)?.addEventListener("click", handler);
-
-    bind("brandBtn", () => this.switchMainView("home"));
-    bind("navHomeBtn", () => this.switchMainView("home"));
+    bind("brandBtn", () => this.app.resetToSupermix());
+    bind("navHomeBtn", () => this.app.resetToSupermix());
     bind("navPlaylistsBtn", () => this.switchMainView("playlists"));
     bind("navHistoryBtn", () => this.switchMainView("history"));
+    bind("toggleSidebarBtn", () => this.toggleSidebar());
+  }
 
-    bind("searchBtn", () => this.app.handleSearch());
+  bindSearch() {
+    document
+      .getElementById("searchBtn")
+      ?.addEventListener("click", () => this.app.handleSearch());
     document.getElementById("searchInput")?.addEventListener("keyup", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -289,32 +346,48 @@ class UIManager {
         this.app.handleSearch();
       }
     });
+  }
 
+  bindPlaylists() {
+    const bind = (id, handler) =>
+      document.getElementById(id)?.addEventListener("click", handler);
     bind("openCreatePlaylistModalBtn", () => this.openCreatePlaylistModal());
     bind("submitCreatePlaylistBtn", () => this.app.submitCreatePlaylist());
     bind("playAllBtn", () => this.app.playCurrentPlaylist());
     bind("addPlaylistActionBtn", () => this.openAddToPlaylistModal());
     bind("saveToPlaylistBtn", () => this.app.saveToPlaylist());
+  }
 
+  bindQueue() {
+    const bind = (id, handler) =>
+      document.getElementById(id)?.addEventListener("click", handler);
     bind("upNextTabBtn", () => this.switchSidebarTab("upnext"));
     bind("lyricsTabBtn", () => this.switchSidebarTab("lyrics"));
     bind("queueModeAllBtn", (e) => this.app.setQueueMode("all", e.target));
     bind("queueModeFamiliarBtn", (e) =>
       this.app.setQueueMode("familiar", e.target),
     );
-    bind("queueModeDiscoverBtn", (e) =>
-      this.app.setQueueMode("discover", e.target),
-    );
 
+    document
+      .getElementById("autoShuffleSwitch")
+      ?.addEventListener("change", (e) => {
+        if (e.target.checked) {
+          this.app.queue.shuffleUpcoming();
+          this.app.renderQueue();
+        }
+      });
+  }
+
+  bindPlayer() {
+    const bind = (id, handler) =>
+      document.getElementById(id)?.addEventListener("click", handler);
     bind("favActionBtn", () => this.app.handlePlayerAction("favorite"));
     bind("upvoteActionBtn", () => this.app.handlePlayerAction("upvote"));
     bind("downvoteActionBtn", () => this.app.handlePlayerAction("downvote"));
     bind("trashActionBtn", () => this.app.handlePlayerAction("trash"));
-
     bind("prevBtn", () => this.app.playPrevious());
     bind("playPauseBtn", () => this.app.audio.togglePlay());
     bind("nextBtn", () => this.app.playNext());
-    bind("toggleSidebarBtn", () => this.toggleSidebar());
     bind("volumeIcon", () => this.app.audio.toggleMute());
 
     document
@@ -327,17 +400,6 @@ class UIManager {
       ?.addEventListener("input", (e) =>
         this.app.audio.seekToPercent(parseFloat(e.target.value)),
       );
-
-    document
-      .getElementById("autoShuffleSwitch")
-      ?.addEventListener("change", (e) => {
-        if (e.target.checked) {
-          this.app.queue.shuffleUpcoming();
-          this.app.renderQueue();
-        }
-      });
-
-    this.bindKeyboardShortcuts();
   }
 
   bindKeyboardShortcuts() {
@@ -441,21 +503,31 @@ class UIManager {
 
   renderPlaylistsSidebar() {
     const container = document.getElementById("playlistSidebarList");
-    const isFavActive =
-      this.app.activePlaylistId === "favorites" ? "active" : "";
 
-    container.innerHTML = `<button class="list-group-item list-group-item-action ${isFavActive} bg-transparent text-light border-secondary" onclick="app.selectPlaylist('favorites', 'Favorites')"><i class="bi bi-heart-fill text-danger me-2"></i> Favorites</button>`;
+    let html = UIBuilder.createPlaylistItemHTML(
+      "favorites",
+      "Favorites",
+      "bi bi-heart-fill text-danger",
+      this.app.activePlaylistId === "favorites",
+    );
 
     this.app.userPlaylists.forEach((p) => {
-      const isActive = this.app.activePlaylistId === p.id ? "active" : "";
-      container.innerHTML += `<button class="list-group-item list-group-item-action ${isActive} bg-transparent text-light border-secondary" onclick="app.selectPlaylist('${p.id}', '${p.name.replace(/'/g, "\\'")}')"><i class="bi bi-music-note-list me-2"></i> ${p.name}</button>`;
+      html += UIBuilder.createPlaylistItemHTML(
+        p.id,
+        p.name,
+        "bi bi-music-note-list",
+        this.app.activePlaylistId === p.id,
+      );
     });
+
+    container.innerHTML = html;
 
     const activeName =
       this.app.activePlaylistId === "favorites"
         ? "Favorites"
         : this.app.userPlaylists.find((p) => p.id === this.app.activePlaylistId)
             ?.name;
+
     this.app.selectPlaylist(this.app.activePlaylistId, activeName);
   }
 
@@ -544,12 +616,28 @@ class AppController {
     this.userPlaylists = [];
     this.activePlaylistId = "favorites";
     this.isFetchingRelated = false;
+
+    this.cachedModes = { all: null, familiar: null };
+    this.queue.mode = "all";
   }
 
   async init() {
     this.ui.switchMainView("home");
     await this.loadPlaylists();
     this.loadHomeRecommendations();
+  }
+
+  resetToSupermix() {
+    const searchInput = document.getElementById("searchInput");
+    const currentTitle = document.getElementById("homeSectionTitle").innerText;
+
+    this.ui.switchMainView("home");
+
+    // Only make the API call if we are stuck on search results
+    if (searchInput.value.trim() !== "" || !currentTitle.includes("Supermix")) {
+      searchInput.value = "";
+      this.loadHomeRecommendations();
+    }
   }
 
   async loadPlaylists() {
@@ -628,7 +716,11 @@ class AppController {
     document
       .querySelectorAll("#playlistSidebarList button")
       .forEach((b) => b.classList.remove("active"));
-    if (event?.currentTarget) event.currentTarget.classList.add("active");
+
+    const activeBtn = document.querySelector(
+      `#playlistSidebarList button[data-playlist-id="${id}"]`,
+    );
+    if (activeBtn) activeBtn.classList.add("active");
 
     const container = document.getElementById("playlistTracksContainer");
     container.innerHTML =
@@ -705,35 +797,36 @@ class AppController {
       this.playFromContext(0, this.activePlaylistTracks, true);
   }
 
-  setQueueMode(mode, btnElement) {
+  async setQueueMode(mode, btnElement) {
     this.queue.mode = mode;
+
     document
       .querySelectorAll(".chip-btn")
       .forEach((b) => b.classList.remove("active"));
     if (btnElement) btnElement.classList.add("active");
 
-    const current = this.queue.getCurrent();
-    if (!current || this.queue.isPlaylistMode) return;
+    const currentTrack = this.queue.getCurrent();
+    if (!currentTrack || this.queue.isPlaylistMode) return;
 
-    this.rebuildUpNextQueue(current.id);
+    if (this.cachedModes[mode]) {
+      this.restoreCachedQueue(this.cachedModes[mode]);
+    } else {
+      await this.rebuildUpNextQueue(currentTrack.id);
+    }
   }
 
-  /**
-   * Executes when picking a track from OUTSIDE the queue (Home, Playlist, Search).
-   * Destructively clears existing queue history and respects the shuffle switch.
-   */
   playFromContext(index, trackList, isPlaylist = false) {
     const shouldShuffle =
       document.getElementById("autoShuffleSwitch")?.checked ?? true;
     this.queue.setContext(trackList, index, isPlaylist, shouldShuffle);
+
+    this.cachedModes = { all: null, familiar: null };
+    if (!isPlaylist) this.cachedModes[this.queue.mode] = [...this.queue.tracks];
+
     this.renderQueue();
     this.executePlay();
   }
 
-  /**
-   * Executes when picking a track INSIDE the "Up Next" queue.
-   * Strictly updates the pointer. Never triggers auto-shuffle logic.
-   */
   playFromQueue(index) {
     if (this.queue.moveTo(index)) this.executePlay();
   }
@@ -772,7 +865,6 @@ class AppController {
   }
 
   renderQueue() {
-    // Wiring logic: Items inside Up Next ALWAYS trigger playFromQueue, never playFromContext.
     this.ui.renderTrackList("upNextContainer", this.queue.tracks, (idx) =>
       this.playFromQueue(idx),
     );
@@ -804,6 +896,7 @@ class AppController {
       );
       if (res.data && res.data.length > 0) {
         this.queue.appendUnique(res.data);
+        this.cachedModes[this.queue.mode] = [...this.queue.tracks];
         this.renderQueue();
       }
     } catch (e) {
@@ -815,30 +908,35 @@ class AppController {
 
   async rebuildUpNextQueue(videoId) {
     if (this.isFetchingRelated || this.queue.isPlaylistMode) return;
+
     this.isFetchingRelated = true;
-    document.getElementById("upNextContainer").innerHTML =
+    const container = document.getElementById("upNextContainer");
+    container.innerHTML =
       '<div class="text-center mt-4"><div class="spinner-border text-secondary"></div></div>';
 
     try {
       const res = await ApiService.get(
         `/api/recommendation/related/${videoId}?mode=${this.queue.mode}`,
       );
-
       const current = this.queue.getCurrent();
-      this.queue.tracks = [current];
-      this.queue.index = 0;
 
-      if (res.data) {
-        this.queue.appendUnique(res.data);
-        this.queue.shuffleUpcoming();
-      }
+      const newTracks = [current, ...(res.data || [])];
+      this.cachedModes[this.queue.mode] = newTracks;
 
-      this.renderQueue();
+      this.restoreCachedQueue(newTracks);
     } catch (e) {
-      console.error("Rebuild queue err", e);
+      console.error("Cache build failed", e);
+      container.innerHTML =
+        '<div class="text-muted text-center mt-4">Failed to load recommendations.</div>';
     } finally {
       this.isFetchingRelated = false;
     }
+  }
+
+  restoreCachedQueue(trackList) {
+    this.queue.tracks = [...trackList];
+    if (this.queue.index >= this.queue.tracks.length) this.queue.index = 0;
+    this.renderQueue();
   }
 
   async handlePlayerAction(action) {

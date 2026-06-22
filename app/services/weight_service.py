@@ -1,18 +1,21 @@
-from sqlalchemy.orm import Session
 from datetime import datetime, timezone
-from app.db.models import WeightScore
-from app.services.common_service import get_or_create_dummy_user
+from sqlalchemy.orm import Session
+from app.db.models import WeightScore, MediaMetadata
+from app.services.common_service import get_or_create_dummy_user, DUMMY_USER_ID
 
 DECAY_RATE_PER_DAY = 0.5
 
 
 def _get_or_create_weight(db: Session, external_id: str) -> WeightScore:
     user_id = get_or_create_dummy_user(db)
-    weight = db.query(WeightScore).filter_by(
-        user_id=user_id, external_id=external_id).first()
+    weight = db.query(WeightScore).filter(
+        WeightScore.user_id == user_id,
+        WeightScore.external_id == external_id
+    ).first()
 
     if not weight:
-        weight = WeightScore(user_id=user_id, external_id=external_id)
+        weight = WeightScore(
+            user_id=user_id, external_id=external_id, base_score=0.0)
         db.add(weight)
         db.commit()
         db.refresh(weight)
@@ -20,32 +23,23 @@ def _get_or_create_weight(db: Session, external_id: str) -> WeightScore:
     return weight
 
 
-def calculate_effective_score(weight: WeightScore | None) -> float:
-    if not weight:
-        return 0.0
+def calculate_effective_score(weight: WeightScore) -> float:
     if weight.is_trashed:
         return -1.0
 
     base = float(weight.base_score)
-    if weight.is_favorited:
-        base += 10.0
 
     if weight.last_played_at:
-        lp = weight.last_played_at
-        if isinstance(lp, str):
-            try:
-                lp = datetime.fromisoformat(lp)
-            except ValueError:
-                pass
+        days_since = (datetime.now(timezone.utc) -
+                      weight.last_played_at.replace(tzinfo=timezone.utc)).days
+        if days_since > 0:
+            decay = days_since * DECAY_RATE_PER_DAY
+            base = max(0.0, base - decay)
 
-        if isinstance(lp, datetime):
-            if lp.tzinfo is None:
-                lp = lp.replace(tzinfo=timezone.utc)
-            days_inactive = (datetime.now(timezone.utc) - lp).days
-            if days_inactive > 0:
-                base = max(0.0, base - (days_inactive * DECAY_RATE_PER_DAY))
+    if weight.is_favorited:
+        base += 100.0
 
-    return round(base, 1)
+    return round(base, 2)
 
 
 def apply_active_action(db: Session, external_id: str, action: str) -> float:
@@ -82,36 +76,28 @@ def apply_passive_progress(db: Session, external_id: str, seconds_listened: floa
     return calculate_effective_score(weight)
 
 
-def get_scores_for_tracks(db: Session, track_ids: list[str]) -> dict[str, dict]:
+def enrich_tracks_with_scores(db: Session, tracks: list[dict]) -> list[dict]:
     user_id = get_or_create_dummy_user(db)
+    external_ids = [t["id"] for t in tracks]
+
     weights = db.query(WeightScore).filter(
         WeightScore.user_id == user_id,
-        WeightScore.external_id.in_(track_ids)
+        WeightScore.external_id.in_(external_ids)
     ).all()
 
-    return {
-        w.external_id: {
-            "score": calculate_effective_score(w),
-            "is_favorited": w.is_favorited,
-            "is_trashed": w.is_trashed
-        } for w in weights
-    }
+    score_map = {w.external_id: w for w in weights}
 
+    enriched = []
+    for track in tracks:
+        w = score_map.get(track["id"])
+        if w:
+            track["score"] = calculate_effective_score(w)
+            track["is_favorited"] = w.is_favorited
+            track["is_trashed"] = w.is_trashed
+        else:
+            track["score"] = 0.0
+            track["is_favorited"] = False
+            track["is_trashed"] = False
+        enriched.append(track)
 
-def enrich_tracks_with_scores(db: Session, raw_tracks: list[dict]) -> list[dict]:
-    """Centralized logic to apply user affinity scores and strictly filter out trashed items."""
-    track_ids = [t["id"] for t in raw_tracks]
-    score_map = get_scores_for_tracks(db, track_ids)
-
-    final_tracks = []
-    for track in raw_tracks:
-        metrics = score_map.get(
-            track["id"], {"score": 0.0, "is_favorited": False, "is_trashed": False})
-
-        if metrics["is_trashed"]:
-            continue
-
-        track.update(metrics)
-        final_tracks.append(track)
-
-    return final_tracks
+    return enriched

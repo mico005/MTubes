@@ -132,6 +132,29 @@ body {
   color: #dc3545 !important; /* Keep hearts red */
 }
 
+/* Playlist Items */
+.playlist-item {
+  cursor: pointer;
+  background-color: transparent !important;
+  border: none !important;
+  border-bottom: 1px solid #333 !important;
+  border-left: 3px solid transparent !important;
+  color: #ccc !important;
+  transition: all 0.2s ease;
+}
+
+.playlist-item:hover {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  color: #fff !important;
+}
+
+.playlist-item.active {
+  background-color: rgba(59, 113, 202, 0.1) !important;
+  color: var(--mtube-primary) !important;
+  border-left: 3px solid var(--mtube-primary) !important;
+  font-weight: 600;
+}
+
 /* Queue Mode Filter Chips */
 .filter-chips {
   display: flex;
