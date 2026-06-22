@@ -220,6 +220,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 project.md
-music_clone.db
-music_clone.db-shm
-music_clone.db-wal
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
