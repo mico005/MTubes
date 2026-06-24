@@ -20,6 +20,6 @@ def record_play_history(
 
 
 @router.get("/")
-def get_play_history(limit: int = 20, db: Session = Depends(get_db)):
+def get_play_history(limit: int = 100, db: Session = Depends(get_db)):
     history = fetch_recent_history(db, limit)
     return {"status": "success", "data": history}

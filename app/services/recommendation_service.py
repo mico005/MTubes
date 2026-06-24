@@ -147,6 +147,7 @@ def _rank_candidates_by_session_vector(
     db: Session,
     candidate_tracks: list[dict],
     session_vector: np.ndarray,
+    drift_factor: float = 0.08
 ) -> list[dict]:
     analyzed_media_records = (
         db.query(MediaMetadata)
@@ -167,7 +168,6 @@ def _rank_candidates_by_session_vector(
     for track in candidate_tracks:
         candidate_vector = feature_map.get(track["id"])
         if candidate_vector is None:
-            # Grant unanalyzed tracks a fair baseline similarity so they don't get buried at the bottom
             ranked_tracks.append({**track, "similarity": 0.65})
             continue
 
@@ -175,13 +175,18 @@ def _rank_candidates_by_session_vector(
             session_vector, candidate_vector)
         ranked_tracks.append({**track, "similarity": similarity_score})
 
-    ranked_tracks.sort(key=lambda x: x["similarity"], reverse=True)
+    # Inject noise to allow organic mood gradations instead of strict echo chambers
+    for track in ranked_tracks:
+        noise = random.uniform(-drift_factor, drift_factor)
+        track["effective_rank"] = track.get("similarity", 0.0) + noise
+
+    ranked_tracks.sort(key=lambda x: x["effective_rank"], reverse=True)
     return ranked_tracks
 
 
 async def get_history_mix(
     db: Session,
-    limit: int = 20,
+    limit: int = 100,
     background_tasks: BackgroundTasks | None = None
 ) -> list[dict]:
     top_tracks = get_top_scored_local_tracks(db, limit=50)
@@ -214,7 +219,7 @@ async def get_history_mix(
     session_vector = _build_session_vector(db)
     if session_vector is not None:
         ranked_mix = _rank_candidates_by_session_vector(
-            db, unique_mix, session_vector)
+            db, unique_mix, session_vector, drift_factor=0.15)
         if ranked_mix:
             return enrich_tracks_with_scores(db, ranked_mix[:limit])
 
@@ -275,12 +280,9 @@ async def get_weighted_related_tracks(
     # 3. Apply Acoustic Sorting to the filtered list
     session_vector = _build_session_vector(db)
     if session_vector is not None:
-        ranked_tracks = _rank_candidates_by_session_vector(
-            db, filtered_candidates, session_vector)
-        if mode == "discover":
-            # Prevent strict determinism for new tracks
-            random.shuffle(ranked_tracks[:5])
-        return ranked_tracks
+        # Discover mode uses higher drift to explore adjacent acoustic spaces faster
+        drift = 0.25 if mode == "discover" else 0.08
+        return _rank_candidates_by_session_vector(db, filtered_candidates, session_vector, drift)
 
     # 4. Fallback if no session vector exists yet
     if mode in ["familiar", "all"]:

@@ -2,6 +2,7 @@ import asyncio
 import os
 import tempfile
 import uuid
+import glob
 from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, Any
 
@@ -11,6 +12,7 @@ import yt_dlp
 from sqlalchemy.orm import Session
 
 from app.db.models import MediaMetadata
+from app.services.weight_service import apply_active_action
 
 cpu_pool = ProcessPoolExecutor(max_workers=2)
 
@@ -18,7 +20,6 @@ cpu_pool = ProcessPoolExecutor(max_workers=2)
 def _download_audio_to_temp(video_id: str, base_path: str) -> bool:
     ydl_opts = {
         'format': 'bestaudio/best',
-        # Critical: Allow yt-dlp to download the native format before ffmpeg converts it
         'outtmpl': f"{base_path}.%(ext)s",
         'quiet': True,
         'no_warnings': True,
@@ -34,21 +35,28 @@ def _download_audio_to_temp(video_id: str, base_path: str) -> bool:
         return False
 
 
-def _extract_features_cpu_bound(audio_path: str) -> Dict[str, float]:
+def _extract_features_cpu_bound(audio_path: str) -> Dict[str, Any]:
     try:
         y, sr = librosa.load(audio_path, sr=22050, mono=True, duration=60)
 
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
         rms_energy = librosa.feature.rms(y=y)
+        zcr = librosa.feature.zero_crossing_rate(y=y)
 
         energy = min(1.0, float(np.mean(rms_energy)) / 0.5)
         bpm = float(tempo[0] if isinstance(tempo, np.ndarray) else tempo)
         danceability = min(1.0, bpm / 200.0)
 
+        # Layer 2: Acoustic Speech/Noise Validation
+        # High ZCR variance is indicative of spoken word (consonants/fricatives)
+        zcr_var = float(np.var(zcr))
+        is_speech_or_noise = (zcr_var > 0.04 and danceability < 0.35)
+
         return {
             "energy": round(energy, 3),
             "danceability": round(danceability, 3),
-            "acousticness": round(1.0 - energy, 3)
+            "acousticness": round(1.0 - energy, 3),
+            "is_valid_music": not is_speech_or_noise
         }
     except Exception as e:
         print(f"[DSP Error] librosa extraction failed for {audio_path}: {e}")
@@ -62,7 +70,6 @@ async def process_audio_features(db: Session, video_id: str, internal_id: Any):
         db.rollback()
         return
 
-    # Critical: Release the lock BEFORE heavy CPU operations start
     db.rollback()
 
     random_id = str(uuid.uuid4())
@@ -84,6 +91,12 @@ async def process_audio_features(db: Session, video_id: str, internal_id: Any):
             print(f"[DSP Error] Feature array empty for {video_id}")
             return
 
+        # If acoustic analysis proves this is a podcast/interview, auto-trash it.
+        if not features.get("is_valid_music", True):
+            print(
+                f"[DSP Action] Auto-trashing non-music audio track: {video_id}")
+            apply_active_action(db, video_id, "trash")
+
         db_media = db.query(MediaMetadata).filter(
             MediaMetadata.id == internal_id).first()
         if db_media:
@@ -97,10 +110,8 @@ async def process_audio_features(db: Session, video_id: str, internal_id: Any):
     except Exception as e:
         print(f"[DSP Error] Pipeline crashed for {video_id}: {e}")
     finally:
-        if os.path.exists(mp3_path):
-            os.remove(mp3_path)
-        # Cleanup source webm/m4a files if ffmpeg postprocessor crashed
-        for ext in ['.webm', '.m4a', '.mp4']:
-            fallback = f"{base_path}{ext}"
-            if os.path.exists(fallback):
-                os.remove(fallback)
+        for temp_file in glob.glob(f"{base_path}*"):
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass

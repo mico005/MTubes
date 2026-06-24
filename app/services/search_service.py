@@ -1,5 +1,8 @@
 import asyncio
 import yt_dlp
+from ytmusicapi import YTMusic
+
+_ytmusic_client = YTMusic()
 
 
 async def execute_search(query: str, max_results: int = 10) -> list[dict]:
@@ -27,9 +30,24 @@ async def execute_search(query: str, max_results: int = 10) -> list[dict]:
                     "title": entry.get("title"),
                     "duration": entry.get("duration"),
                     "uploader": entry.get("uploader"),
-                    "thumbnail": entry.get("thumbnails", [{}])[0].get("url", "")
+                    "thumbnail": entry.get("thumbnails", [{}])[0].get("url", "") if entry.get("thumbnails") else ""
                 }
                 for entry in result['entries']
             ]
 
     return await asyncio.to_thread(fetch)
+
+
+def get_search_suggestions_sync(query: str) -> list[str]:
+    """Fetches live autocomplete suggestions from YouTube Music."""
+    if not query.strip():
+        return []
+    try:
+        raw_suggestions = _ytmusic_client.get_search_suggestions(query)
+        return [
+            item.get("query", "") if isinstance(item, dict) else str(item)
+            for item in raw_suggestions
+        ]
+    except Exception as e:
+        print(f"[Search Error] Failed to fetch suggestions for '{query}': {e}")
+        return []

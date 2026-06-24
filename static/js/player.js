@@ -146,7 +146,6 @@ class AudioController {
   handleStreamError() {
     const err = this.el.error;
 
-    // HTMLMediaElement.MEDIA_ERR_NETWORK === 2
     if (err && err.code === 2 && this.el.src) {
       if (this.retryCount < 3) {
         this.retryCount++;
@@ -167,7 +166,6 @@ class AudioController {
         this.app.playNext();
       }
     } else if (err && err.code === 4) {
-      // HTMLMediaElement.MEDIA_ERR_SRC_NOT_SUPPORTED === 4
       console.error("Stream failed to load. Skipping to next track.");
       this.app.playNext();
     }
@@ -255,6 +253,117 @@ class PassiveScoreTracker {
   }
 }
 
+class SearchAutocomplete {
+  constructor(app) {
+    this.app = app;
+    this.input = document.getElementById("searchInput");
+    this.btn = document.getElementById("searchBtn");
+    this.historyKey = "mtube_search_history";
+    this.debounceTimer = null;
+
+    if (!this.input) return;
+    this.setupUI();
+    this.bindEvents();
+  }
+
+  setupUI() {
+    this.inputGroup = this.input.closest(".input-group");
+    if (this.inputGroup) {
+      this.inputGroup.classList.add("position-relative");
+      this.dropdown = document.createElement("ul");
+      this.dropdown.className = "suggestions-dropdown d-none";
+      this.inputGroup.appendChild(this.dropdown);
+    }
+  }
+
+  bindEvents() {
+    this.input.addEventListener("input", (e) => this.onInput(e.target.value));
+    this.input.addEventListener("focus", () => this.onInput(this.input.value));
+
+    document.addEventListener("click", (e) => {
+      if (!this.input.contains(e.target) && !this.dropdown.contains(e.target)) {
+        this.hide();
+      }
+    });
+  }
+
+  onInput(query) {
+    clearTimeout(this.debounceTimer);
+    const trimmed = query.trim();
+
+    if (!trimmed) {
+      this.showHistory();
+      return;
+    }
+
+    this.debounceTimer = setTimeout(() => this.fetchSuggestions(trimmed), 300);
+  }
+
+  async fetchSuggestions(query) {
+    try {
+      const res = await fetch(
+        `/api/search/suggestions?q=${encodeURIComponent(query)}`,
+      );
+      const json = await res.json();
+      if (json.status === "success" && json.data.length > 0) {
+        this.render(json.data, "Suggestions", "bi-search");
+      } else {
+        this.hide();
+      }
+    } catch (err) {
+      console.error("Autocomplete fetch failed:", err);
+    }
+  }
+
+  showHistory() {
+    const history = JSON.parse(localStorage.getItem(this.historyKey) || "[]");
+    if (history.length > 0) {
+      this.render(history, "Recent Searches", "bi-clock-history");
+    } else {
+      this.hide();
+    }
+  }
+
+  saveHistory(query) {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+
+    let history = JSON.parse(localStorage.getItem(this.historyKey) || "[]");
+    history = history.filter((item) => item !== trimmed);
+    history.unshift(trimmed);
+    if (history.length > 10) history.pop();
+
+    localStorage.setItem(this.historyKey, JSON.stringify(history));
+    this.hide();
+  }
+
+  render(items, headerText, iconClass) {
+    this.dropdown.innerHTML = `<li class="suggestion-header">${headerText}</li>`;
+
+    items.forEach((item) => {
+      const li = document.createElement("li");
+      li.className = "suggestion-item";
+      li.innerHTML = `<i class="bi ${iconClass}"></i><span>${item}</span>`;
+
+      li.addEventListener("click", () => {
+        this.input.value = item;
+        this.saveHistory(item);
+        this.hide();
+        this.app.ui.switchMainView("home");
+        this.app.handleSearch();
+      });
+
+      this.dropdown.appendChild(li);
+    });
+
+    this.dropdown.classList.remove("d-none");
+  }
+
+  hide() {
+    this.dropdown.classList.add("d-none");
+  }
+}
+
 class UIBuilder {
   static getThumbnail(url) {
     const icon = "bi bi-music-note-beamed fs-4 text-secondary me-3";
@@ -335,13 +444,19 @@ class UIManager {
   }
 
   bindSearch() {
-    document
-      .getElementById("searchBtn")
-      ?.addEventListener("click", () => this.app.handleSearch());
+    this.autocomplete = new SearchAutocomplete(this.app);
+
+    document.getElementById("searchBtn")?.addEventListener("click", () => {
+      const val = document.getElementById("searchInput").value;
+      if (val) this.autocomplete.saveHistory(val);
+      this.app.handleSearch();
+    });
+
     document.getElementById("searchInput")?.addEventListener("keyup", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
         e.target.blur();
+        if (e.target.value) this.autocomplete.saveHistory(e.target.value);
         this.switchMainView("home");
         this.app.handleSearch();
       }
@@ -633,7 +748,6 @@ class AppController {
 
     this.ui.switchMainView("home");
 
-    // Only make the API call if we are stuck on search results
     if (searchInput.value.trim() !== "" || !currentTitle.includes("Supermix")) {
       searchInput.value = "";
       this.loadHomeRecommendations();
